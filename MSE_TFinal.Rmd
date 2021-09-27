@@ -1,0 +1,329 @@
+---
+MANUEL SARAVIA ENRECH, INSO4-Z
+AA-2 - Trabajo Final
+---
+
+# 0. Setup, descripción, carga y preparación de los datos
+## Librerías
+```{r}
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(rpart)
+```
+
+## Descripción del dataset
+Dataset: Breast Cancer data from Wisconsin
+Dataset URL: "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/breast-cancer-wisconsin.data"
+Number of Instances: 699
+Number of Attributes: 11 (10 plus the class attribute)
+Attribute Information:
+   #  Attribute                     Domain
+   -- -----------------------------------------
+   1. Sample code number            id number
+   2. Clump Thickness               1 - 10
+   3. Uniformity of Cell Size       1 - 10
+   4. Uniformity of Cell Shape      1 - 10
+   5. Marginal Adhesion             1 - 10
+   6. Single Epithelial Cell Size   1 - 10
+   7. Bare Nuclei                   1 - 10
+   8. Bland Chromatin               1 - 10
+   9. Normal Nucleoli               1 - 10
+  10. Mitoses                       1 - 10
+  11. Class:                        (2 for benign, 4 for malignant)
+
+Missing attribute values: 16 
+
+
+## Carga de datos
+```{r, results='hide', echo=FALSE}
+#rm(list=ls())
+url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/breast-cancer-wisconsin.data"
+datos <- read.csv(url, header=FALSE)
+str(datos)
+```
+
+## Preparación de los datos
+```{r}
+# 16 missing values in V7 (value = '?')
+datos <- datos[datos$V7 != '?', ]
+datos$V7 <- as.integer(datos$V7)
+
+# renaming variables
+colnames(datos) <- c("id","CT", "UCSize", "UCShape", "MA", "SECS", "BN", "BC", "NN","M", "diagnosis")
+str(datos)
+
+# diagnosis en binario (0 - benigno, 1 - maligno)
+datos$diagnosis[datos$diagnosis == 2] = 0
+datos$diagnosis[datos$diagnosis == 4] = 1
+summary(datos)
+table(datos$diagnosis)
+round(prop.table(table(datos$diagnosis)), 2)
+datos.def <- datos[,-1]
+```
+65% de observaciones son benigno y 35% maligno.
+
+## Revisión de la posible correlación entre variables predictoras
+Hay 9 variables predictoras + la variable target
+```{r}
+cor.res <- cor(datos.def[,-10])
+round(cor.res, 3)
+```
+Podemos ver estos valores de correlación en un gráfico muy completo.
+```{r}
+#install.packages("PerformanceAnalytics")
+library(PerformanceAnalytics)
+chart.Correlation(datos[,2:10], histogram=TRUE, pch=19)
+```
+Se observa una correlación especialmente alta (0.91) entre UCSize y UCShape. 
+Se debería usar solo una de ellas ya que la mayoría de algoritmos asumen que las variables predictoras son independientes unas de otras. 
+La función findcorrelation() del paquete caret usa un algoritmo heurístico para determinar qué variables deberían ser eliminadas entre las predictoras altamente correlacionadas (correlación >= 0.9), en vez de elegirlas nosotros.
+```{r}
+datos.def2 <- datos.def %>% select(-findCorrelation(cor.res, cutoff = 0.9))
+str(datos.def2)
+```
+Se ha eliminado la variable UCSize. Nos quedan por tanto 8 variables predictoras.
+
+## Dataset para training (70%) y test (30%)
+```{r}
+set.seed(111)
+df_train_index <- createDataPartition(datos.def2$diagnosis, times = 1, p = 0.7, list = FALSE)
+df_train <- datos.def2[df_train_index, ]
+df_test <-  datos.def2[-df_train_index, ]
+
+train_labels <- datos.def2$diagnosis[df_train_index]
+test_labels <- datos.def2$diagnosis[-df_train_index]
+
+round(prop.table(table(train_labels)), 2)
+round(prop.table(table(test_labels)), 2)
+```
+
+El reparto está bien, es similar aunque ligeramente más alto el % de positivos en el dataset de test.
+
+
+# 1. Modelo Logistic Regression
+## Creación del modelo
+```{r}
+modelo.glm <- glm(diagnosis ~ ., family=binomial(link="logit"), data=df_train)
+summary(modelo.glm)
+anova(modelo.glm, test="Chisq")
+```
+AIC: 96.534
+Las variables CT, UCShape, MA, BN y SECS son significativas.
+
+## Plot del modelo (residuos)
+```{r}
+par(mfrow=c(2,2))
+plot(modelo.glm)
+```
+Las gráficas de residuos muestran un ajuste muy bueno del modelo.
+
+## Evaluar rendimiento del modelo glm con caret
+```{r}
+puntoCorte = 0.5 # punto de corte para positivo/negativo. Inicialmente 0.5
+pred_test_prob.glm = predict(modelo.glm, df_test, type = "response")
+pred_test.glm = ifelse(pred_test_prob.glm > puntoCorte, 1, 0)
+```
+### Confusion matrix
+```{r}
+t.glm <- table(pred_test.glm, test_labels)
+caret::confusionMatrix(t.glm, positive = "1")
+```
+
+Obtenemos unos resultados buenísimos como era previsible:
+- Accuracy : 0.9755 (% casos bien predichos)
+- Kappa : 0.948
+- Sensitivity : 0.9740 (% casos malignos bien predichos)
+- Specificity : 0.9764 (% casos benignos bien predichos)
+
+### Curva ROC y AUC
+```{r}
+library(ROCR)
+library(ggplot2, quietly=TRUE)
+
+pred <- prediction(pred_test.glm, test_labels)
+# ROC Y AUC
+pe <- performance(pred, "tpr", "fpr")
+au <- performance(pred, "auc")@y.values[[1]]
+pd <- data.frame(fpr=unlist(pe@x.values), tpr=unlist(pe@y.values))
+p <- ggplot(pd, aes(x=fpr, y=tpr))
+p <- p + geom_line(colour="red")
+p <- p + xlab("False Positive Rate") + ylab("True Positive Rate")
+p <- p + ggtitle("ROC Curve")
+p <- p + theme(plot.title=element_text(size=10))
+p <- p + geom_line(data=data.frame(), aes(x=c(0,1), y=c(0,1)), colour="grey")
+p <- p + annotate("text", x=0.50, y=0.00, hjust=0, vjust=0, size=5,
+                   label=paste("AUC =", round(au, 3)))
+print(p)
+```
+Obtenemos un valor altísimo de AUC (0.975) en consonancia con los otros valores obtenidos anteriormente, que confirma la extrema bondad del modelo.
+
+## Posible mejora del modelo con ajuste del pùnto de corte
+Retomemos la Confusion Matrix, Sensitivity = 0.9740
+         test_labels
+pred_test   0   1
+        0 124   2
+        1   3  75
+
+De los 77 casos de test malignos hemos acertado 75 (97,4%).
+Dado que se trata de detección de cáncer lo más importante es acertar los casos malignos, evitando predecir como benignos casos que sean malignos. 
+Un falso positivo también es un error pero quedaría solo un susto y un coste extra para el sistema de salud (pruebas adicionales que descubrirían el error).
+Así que bajando la variable puntoCorte inicialmente fijada a 0.5, podemos hacer que el modelo sea más sensible a la detección de posibles casos malignos.
+
+Vamos entonces primero a chequear los 5 casos predichos erróneamente y el valor pred_test_prob reportado en la predicción.
+
+```{r}
+df_check <- as.data.frame(cbind(test_labels, pred_test.glm, pred_test_prob.glm))
+df_check[df_check$test_labels != df_check$pred_test.glm,]
+```
+Vemos que si el puntoCorte lo bajamos a 0.35 el caso maligno 64 ya sería clasificado correctamente. Lógicamente esto puede afectar a la clasificación de casos benignos como malignos (Falsos Positivos)
+Veamos cómo queda la Confusión matrix con este cambio:
+
+```{r}
+puntoCorte = 0.35 # fijamos un nuevo punto de corte
+pred_test.glm = ifelse(pred_test_prob.glm > puntoCorte, 1, 0)
+```
+```{r}
+t.glm <- table(pred_test.glm, test_labels)
+caret::confusionMatrix(t.glm, positive = "1")
+```
+Como era previsible ya solo aparece un único caso maligno clasificado como benigno. Y a cambio nos ha aparecido un nuevo falso positivo.
+Por tanto se mantiene el Accuracy (0.9755), aumenta muy ligeramente el kappa (0.9482 vs 0.948), aumenta ligeramente la Sensitivity (0.9870 vs 0.9740) y disminuye ligeramente la Specificity (0.9685 vs 0.9764).
+
+Veamos ahora cómo queda la curva ROC y el AUC.
+```{r}
+pred <- prediction(pred_test.glm, test_labels)
+# ROC Y AUC
+pe <- performance(pred, "tpr", "fpr")
+au <- performance(pred, "auc")@y.values[[1]]
+pd <- data.frame(fpr=unlist(pe@x.values), tpr=unlist(pe@y.values))
+p <- ggplot(pd, aes(x=fpr, y=tpr))
+p <- p + geom_line(colour="red")
+p <- p + xlab("False Positive Rate") + ylab("True Positive Rate")
+p <- p + ggtitle("ROC Curve")
+p <- p + theme(plot.title=element_text(size=10))
+p <- p + geom_line(data=data.frame(), aes(x=c(0,1), y=c(0,1)), colour="grey")
+p <- p + annotate("text", x=0.50, y=0.00, hjust=0, vjust=0, size=5,
+                   label=paste("AUC =", round(au, 3)))
+print(p)
+```
+
+Obtenemos un valor de AUC de 0.978, que mejora muy ligeramente al anterior (0.975).
+
+Como conclusión, y siendo prudentes dado que se trata de cáncer, consideramos que un punto de corte de 0.35 resulta más seguro que el valor por defecto de 0.5. Aunque la variación de las métricas sea mínima.
+
+# 2. Modelo Decision Tree (rpart)
+## Creación del modelo Decision Tree (rpart)
+```{r}
+modelo.rpart <- rpart(diagnosis ~ .,
+    data=df_train,
+    method="class",
+    parms=list(split="information"))
+
+summary(modelo.rpart)
+```
+## Plot y reglas del modelo
+```{r}
+library(rattle)
+fancyRpartPlot(modelo.rpart, main="Decision Tree (rpart)\n", sub="")
+```
+```{r}
+asRules(modelo.rpart)
+```
+## Evaluar rendimiento del modelo rpart con caret
+```{r}
+puntoCorte = 0.50 # inicialmente 0.5 
+pred_test_prob.rpart = predict(modelo.rpart, df_test, type = "prob")[,2]
+pred_test.rpart = ifelse(pred_test_prob.rpart > puntoCorte, 1, 0)
+```
+
+### Confusion matrix
+```{r}
+t.rpart <- table(pred_test.rpart, test_labels)
+caret::confusionMatrix(t.rpart, positive = "1")
+```
+Obtenemos unos resultados muy buenos:
+- Accuracy : 0.9461
+- Kappa : 0.8856
+- Sensitivity : 0.9351
+- Specificity : 0.9528 
+
+### Curva ROC y AUC
+```{r}
+pred <- prediction(pred_test.rpart, test_labels)
+# ROC Y AUC
+pe <- performance(pred, "tpr", "fpr")
+au <- performance(pred, "auc")@y.values[[1]]
+pd <- data.frame(fpr=unlist(pe@x.values), tpr=unlist(pe@y.values))
+p <- ggplot(pd, aes(x=fpr, y=tpr))
+p <- p + geom_line(colour="red")
+p <- p + xlab("False Positive Rate") + ylab("True Positive Rate")
+p <- p + ggtitle("ROC Curve")
+p <- p + theme(plot.title=element_text(size=10))
+p <- p + geom_line(data=data.frame(), aes(x=c(0,1), y=c(0,1)), colour="grey")
+p <- p + annotate("text", x=0.50, y=0.00, hjust=0, vjust=0, size=5,
+                   label=paste("AUC =", round(au, 3)))
+print(p)
+```
+Obtenemos un valor muy alto de AUC (0.944), que confirma la bondad del modelo.
+
+## Posible mejora del modelo con ajuste del punto de corte
+Chequeamos los valores de prob de los fallos para ver si podemos mejorar el modelo ajustando el punto de corte.
+Veremos que no podemos, dado que los valores de prob obtenidos son o muy altos (> 0.93) o muy bajos (< 0.02).
+```{r}
+df_check <- as.data.frame(cbind(test_labels, pred_test.rpart, pred_test_prob.rpart))
+df_check[df_check$test_labels != df_check$pred_test.rpart,]
+```
+Así que mantenemos el punto de corte en el valor por defecto de 0.5.
+
+NOTA: he probado también decision tree con algoritmo c5.0 por si mejoraba el resultado, y me ha dado el mismo, así que mantengo el modelo con rpart.
+
+# 3. Selección del modelo final entre ambas opciones
+Resumimos las métricas de ajuste de ambos modelos:
+
+1. modelo logistic regression (glm), puntoCorte = 0.35
+- Accuracy : 0.9755
+- Kappa : 0.9482
+- Sensitivity : 0.9870
+- Specificity : 0.9685
+- AUC : 0.978
+
+2. modelo decision tree (rpart), puntoCorte = 0.5
+- Accuracy : 0.9461
+- Kappa : 0.8856
+- Sensitivity : 0.9351
+- Specificity : 0.9528 
+- AUC : 0.944
+
+Podemos considerar dos CRITERIOS principales para seleccionar el mejor modelo:
+* CRITERIO 1: el modelo con mejor resultado en el ajuste. 
+En este caso, el modelo glm es el mejor en todas las métricas, y en particular tiene un excelente valor AUC de 0.978.
+Los valores obtenidos con el modelo rpart también son muy buenos.
+
+* CRITERIO 2: la interpretabilidad/explicabilidad del modelo.
+En este caso, el modelo de árbol de decisión es muy fácil de explicar a un médico y de interpretar los resultados. Ha resultado un árbol muy sencillo con solo 4 reglas.
+Esto no quiere decir, que el modelo de regresión sea complicado, sino que es más entendible e interpretable la predicción realizada con el árbol (2 o 3 preguntas sencillas), que un resultado calculado en base a coeficientes de regresión, que es bastante menos visual para un no experto.
+
+Ejemplo: tomemos la primera pregunta del árbol (UCShape< 2.5), que da lugar a la regla más simple, y aplicable aprox. a un 59% de los casos. 
+ Rule number: 2 [diagnosis=0 cover=284 (59%) prob=0.01]
+   UCShape< 2.5
+
+Si (UCShape < 2.5) entonces clasificamos como benigno (0). Y con un acierto de un 99% (0.986) para el conjunto de train.
+
+Chequeamos la bondad de la regla aplicándola también al conjunto de test:
+```{r}
+t.regla <- table(df_test[df_test$UCShape < 2.5, "diagnosis"])
+prop.t.regla <- prop.table(t.regla)  # % diagnosis=0, % diagnosis=1
+accuracy.regla <- prop.table(t.regla)[1] # % diagnosis=0 (benigno)
+paste("Acierto de la regla #2 (diagnosis = 0) para test dataset: ", round(accuracy.regla, 2))
+```
+Se trata de una regla muy simple que aplica aprox. a un 59% de los casos y con una tasa de acierto de benigno entre el 96% y 99%. No es un discriminador perfecto pero puede ser muy útil para un primer filtro rápido. 
+
+
+* En definitiva, con el criterio 1 elegiríamos el modelo glm y con el criterio 2 elegiríamos el modelo rpart.
+
+* CONCLUSIÓN: 
+Dado que el modelo glm resultante es mejor y no es complicado (es un modelo de regresión lineal), y que se trata de la predicción de casos de cáncer, apostaremos por el modelo glm con un estupendo AUC de 0.978.
+No obstante, y dado que el modelo rpart es también muy bueno y muy sencillo de interpretar (4 reglas), convendría explicárselo igualmente a los servicios médicos usuarios por su facilidad de comprensión y uso.
+
+
